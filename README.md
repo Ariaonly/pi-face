@@ -1,5 +1,4 @@
 # pi-face
-/home/pi/pi-face/
 ├── go-backend/                  ← Go 服务端目录
 │   ├── cmd/
 │   │   └── server/
