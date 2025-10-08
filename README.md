@@ -1,4 +1,5 @@
 # pi-face
+```
 ├── go-backend/                  ← Go 服务端目录
 │   ├── cmd/
 │   │   └── server/
@@ -33,3 +34,5 @@
 │
 ├── run.sh                       ← 一键启动脚本（Python + Go）
 └── README.md                    ← 项目说明文档
+```
+
