@@ -1,35 +1,28 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
 from PIL import Image
-import base64, io, numpy as np, cv2
-
+import base64, io, numpy as np
 from recognizer import FaceRecognizer
+from utils.camera import CameraThread
 
 app = Flask(__name__)
 recog = FaceRecognizer(faces_dir="faces", embed_dir="embeddings")
 
-def parse_image():
-    """从JSON或multipart解析图片，返回RGB numpy"""
-    if request.content_type and "application/json" in request.content_type:
-        data = request.get_json(silent=True)
-        if not data or "image" not in data:
-            return None, "missing image"
-        b64 = data["image"].split(",")[-1]
-        img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
-    elif request.files.get("image"):
-        f = request.files["image"]
-        img = Image.open(f.stream).convert("RGB")
-    else:
-        return None, "no image"
-    return np.array(img), None
+# 启动摄像头线程
+camera = CameraThread(recog, interval=3.0)
+camera.start()
 
 @app.route("/detect", methods=["POST"])
 def detect():
-    frame, err = parse_image()
-    if err:
-        return jsonify({"error": err}), 400
+    # 保留旧的上传识别接口
+    data = request.get_json(silent=True)
+    if not data or "image" not in data:
+        return jsonify({"error": "missing image"}), 400
+    b64 = data["image"].split(",")[-1]
+    img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    frame = np.array(img)
     res = recog.recognize(frame)
-    res["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    res["timestamp"] = datetime.utcnow().isoformat()+"Z"
     return jsonify(res)
 
 @app.route("/status")
