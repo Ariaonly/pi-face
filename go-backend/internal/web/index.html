@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Pi-Face Minimal</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; }
+    .box { padding: 20px; border: 1px solid #ccc; border-radius: 10px; }
+    img { max-width: 300px; border: 1px solid #ccc; border-radius: 8px; }
+    pre { background: #111; color: #0f0; padding: 10px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Pi-Face · 阶段一 (假识别链路)</h2>
+  <div class="box">
+    <input type="file" id="file" accept="image/*">
+    <button id="btn">上传识别</button>
+    <p>上传任意图片，系统返回图片尺寸与时间戳。</p>
+    <img id="preview" />
+    <pre id="out">{}</pre>
+  </div>
+
+  <script>
+    const file = document.getElementById('file');
+    const preview = document.getElementById('preview');
+    const out = document.getElementById('out');
+    const btn = document.getElementById('btn');
+
+    file.addEventListener('change', () => {
+      const f = file.files[0];
+      if (f) preview.src = URL.createObjectURL(f);
+    });
+
+    btn.onclick = async () => {
+      const f = file.files[0];
+      if (!f) return alert('请选择图片');
+      const fd = new FormData();
+      fd.append('image', f);
+      out.textContent = '请求中...';
+      const res = await fetch('/api/detect', { method: 'POST', body: fd });
+      const data = await res.json();
+      out.textContent = JSON.stringify(data, null, 2);
+    };
+  </script>
+</body>
+</html>
+
