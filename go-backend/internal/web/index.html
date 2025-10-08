@@ -41,7 +41,18 @@
       const data = await res.json();
       out.textContent = JSON.stringify(data, null, 2);
     };
+    async function loadRecords() {
+    const res = await fetch('/api/records');
+    const data = await res.json();
+    const out = document.getElementById('records');
+    out.innerHTML = data.map(r => `${r.timestamp} → ${r.name} (${r.confidence})`).join('<br>');
+}
+setInterval(loadRecords, 5000);
+
   </script>
+     <h3>识别记录</h3>
+    <div id="records" style="font-family:monospace; background:#f7f7f7; padding:10px;"></div>
+
 </body>
 </html>
 
