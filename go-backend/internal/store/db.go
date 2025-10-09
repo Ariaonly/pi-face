@@ -1,59 +1,75 @@
+// go-backend/internal/store/db.go
 package store
 
 import (
+	"context"
 	"database/sql"
-	"log"
-	"time"
-
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
+	"os"
 )
 
-type DB struct {
-	*sql.DB
+type Store struct {
+	DB *sql.DB
 }
 
-func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path)
+type Record struct {
+	ID         int64   `json:"id"`
+	Name       string  `json:"name"`
+	Confidence float64 `json:"confidence"`
+	Timestamp  string  `json:"timestamp"`
+}
+
+func Open(dataPath string) (*Store, error) {
+	// 确保目录存在
+	if err := os.MkdirAll(dataPath, 0o755); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dataPath+"/face.db")
 	if err != nil {
 		return nil, err
 	}
+	s := &Store{DB: db}
+	if err := s.init(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) init() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS records (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT,
-		confidence REAL,
-		ts DATETIME
-	);`
-	if _, err := db.Exec(schema); err != nil {
-		return nil, err
-	}
-	return &DB{db}, nil
+CREATE TABLE IF NOT EXISTS records(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  timestamp TEXT NOT NULL
+);
+`
+	_, err := s.DB.Exec(schema)
+	return err
 }
 
-func (db *DB) AddRecord(name string, conf float64) {
-	_, err := db.Exec("INSERT INTO records(name, confidence, ts) VALUES (?, ?, ?)", name, conf, time.Now().UTC())
-	if err != nil {
-		log.Println("insert error:", err)
-	}
+func (s *Store) InsertRecord(ctx context.Context, r Record) error {
+	_, err := s.DB.ExecContext(ctx,
+		"INSERT INTO records(name, confidence, timestamp) VALUES (?, ?, ?)",
+		r.Name, r.Confidence, r.Timestamp,
+	)
+	return err
 }
 
-func (db *DB) ListRecords(limit int) ([]map[string]interface{}, error) {
-	rows, err := db.Query("SELECT name, confidence, ts FROM records ORDER BY id DESC LIMIT ?", limit)
+func (s *Store) ListRecords(ctx context.Context, limit int) ([]Record, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		"SELECT id, name, confidence, timestamp FROM records ORDER BY id DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var result []map[string]interface{}
+	var out []Record
 	for rows.Next() {
-		var name string
-		var conf float64
-		var ts string
-		rows.Scan(&name, &conf, &ts)
-		result = append(result, map[string]interface{}{
-			"name":       name,
-			"confidence": conf,
-			"timestamp":  ts,
-		})
+		var r Record
+		if err := rows.Scan(&r.ID, &r.Name, &r.Confidence, &r.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
-	return result, nil
+	return out, rows.Err()
 }
