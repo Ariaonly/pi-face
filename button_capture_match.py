@@ -1,4 +1,3 @@
-cat >/app/button_capture_match.py << 'PY'
 import os
 import time
 import csv
@@ -259,4 +258,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-PY
