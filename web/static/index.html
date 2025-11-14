@@ -2,41 +2,74 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>人脸识别记录看板</title>
+  <title>人脸识别日志看板</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Tailwind CDN，用于快速美化界面 -->
+  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100">
-  <div class="max-w-6xl mx-auto px-4 py-6">
+  <div class="max-w-7xl mx-auto px-4 py-6 space-y-6">
     <!-- 顶部标题 -->
-    <header class="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-6">
+    <header class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
       <div>
         <h1 class="text-3xl font-semibold tracking-tight">
-          人脸识别记录看板
+          人脸识别日志看板
         </h1>
         <p class="text-sm text-slate-400 mt-1">
-          实时查看识别日志、错误告警与阈值命中情况
+          基于 /data/logs 的识别记录，支持筛选、详情与图表分析
         </p>
       </div>
-      <div class="flex gap-3">
+      <div class="flex items-center gap-3">
         <button
           id="refreshBtn"
           class="inline-flex items-center justify-center px-4 py-2 rounded-xl text-sm font-medium bg-sky-500 hover:bg-sky-400 text-slate-950 shadow-lg shadow-sky-900/40 transition">
-          手动刷新
+          刷新数据
         </button>
       </div>
     </header>
 
-    <!-- 筛选 + 表格 -->
-    <section
-      class="bg-slate-900/70 border border-slate-700/60 rounded-2xl p-4 md:p-5 shadow-xl shadow-slate-950/60">
+    <!-- 概览卡片 -->
+    <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+        <div class="text-xs font-medium text-slate-400">总记录数</div>
+        <div id="totalCount" class="mt-2 text-2xl font-semibold">-</div>
+      </div>
+      <div class="rounded-2xl border border-emerald-500/30 bg-slate-900/70 p-4">
+        <div class="text-xs font-medium text-emerald-300">OK 记录</div>
+        <div id="okCount" class="mt-2 text-2xl font-semibold text-emerald-300">-</div>
+      </div>
+      <div class="rounded-2xl border border-rose-500/40 bg-slate-900/70 p-4">
+        <div class="text-xs font-medium text-rose-300">ERROR 记录</div>
+        <div id="errorCount" class="mt-2 text-2xl font-semibold text-rose-300">-</div>
+      </div>
+      <div class="rounded-2xl border border-amber-500/40 bg-slate-900/70 p-4">
+        <div class="text-xs font-medium text-amber-300">NO_FACE 记录</div>
+        <div id="noFaceCount" class="mt-2 text-2xl font-semibold text-amber-300">-</div>
+      </div>
+    </section>
+
+    <!-- 图表 -->
+    <section class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 md:p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-medium text-slate-100">
+          相似度趋势（仅统计 status=OK 且数据合法）
+        </h2>
+      </div>
+      <div class="relative h-64 md:h-72">
+        <canvas id="similarityChart"></canvas>
+      </div>
+      <p class="mt-2 text-[11px] text-slate-500">
+        图表会自动过滤 ERROR / NO_FACE 以及数值异常的数据，只展示核心正常识别结果。
+      </p>
+    </section>
+
+    <!-- 列表 + 筛选 -->
+    <section class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 md:p-5">
       <!-- 筛选区 -->
       <div class="flex flex-col md:flex-row md:items-center gap-3 mb-4">
-        <!-- 搜索 -->
         <div class="flex-1">
           <label class="block text-xs font-medium text-slate-400 mb-1">
-            搜索（姓名 / 图片路径 / 消息）
+            搜索（姓名 / 状态 / 消息 / 图片路径）
           </label>
           <div
             class="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2 focus-within:border-sky-500/70">
@@ -44,13 +77,11 @@
             <input
               id="searchInput"
               type="text"
-              placeholder="例如：张三 / ERROR / unknow/x1.jpg"
+              placeholder="例如：张三 / ERROR / NO_FACE"
               class="w-full bg-transparent outline-none text-sm placeholder:text-slate-500" />
           </div>
         </div>
-
-        <!-- 状态筛选 -->
-        <div class="w-full md:w-48">
+        <div class="w-full md:w-52">
           <label class="block text-xs font-medium text-slate-400 mb-1">
             状态筛选
           </label>
@@ -58,46 +89,33 @@
             id="statusFilter"
             class="w-full text-sm rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 focus:border-sky-500/70 outline-none">
             <option value="">全部状态</option>
-            <option value="OK">正常（OK）</option>
-            <option value="ERROR">错误（ERROR）</option>
-            <option value="NO_FACE">未检测人脸（NO_FACE）</option>
+            <option value="OK">OK</option>
+            <option value="ERROR">ERROR</option>
+            <option value="NO_FACE">NO_FACE</option>
           </select>
         </div>
       </div>
 
       <!-- 表格 -->
-      <div class="overflow-x-auto border border-slate-800/80 rounded-2xl">
+      <div class="overflow-x-auto border border-slate-800 rounded-2xl">
         <table class="min-w-full text-sm">
           <thead class="bg-slate-900/80 border-b border-slate-800 text-slate-300">
             <tr>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                时间
-              </th>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                图片
-              </th>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                匹配姓名
-              </th>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                相似度
-              </th>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                阈值
-              </th>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                状态
-              </th>
-              <th class="px-3 py-2 text-left font-medium text-xs uppercase tracking-wide">
-                消息
-              </th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">时间</th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">姓名</th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">相似度</th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">阈值</th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">状态</th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">图片路径</th>
+              <th class="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide">消息</th>
+              <th class="px-3 py-2 text-right text-xs font-medium uppercase tracking-wide">操作</th>
             </tr>
           </thead>
           <tbody id="tableBody" class="divide-y divide-slate-800"></tbody>
         </table>
       </div>
 
-      <!-- 分页 + 统计 -->
+      <!-- 分页 -->
       <div
         class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mt-4 text-xs text-slate-400">
         <div id="summary">正在加载...</div>
@@ -117,39 +135,83 @@
     </section>
   </div>
 
-  <!-- 图片预览弹窗 -->
+  <!-- 详情弹窗 -->
   <div
-    id="imageModal"
+    id="detailModal"
     class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm items-center justify-center">
-    <div class="bg-slate-900/95 border border-slate-700 rounded-2xl max-w-2xl w-[90%] p-4">
+    <div class="bg-slate-900/95 border border-slate-700 rounded-2xl max-w-3xl w-[95%] p-4 md:p-5">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="text-sm font-medium text-slate-100">
-          抓拍图片预览
-        </h2>
+        <h2 class="text-sm font-medium text-slate-100">识别详情</h2>
         <button
-          id="closeModal"
+          id="detailClose"
           class="w-8 h-8 inline-flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm">
           ✕
         </button>
       </div>
-      <div class="max-h-[70vh] overflow-auto flex justify-center">
-        <img
-          id="modalImage"
-          src=""
-          alt="snapshot"
-          class="max-h-[70vh] rounded-xl border border-slate-700" />
+
+      <div class="grid gap-4 md:grid-cols-3">
+        <div class="md:col-span-2">
+          <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-xs md:text-sm">
+            <div>
+              <dt class="text-slate-400">时间</dt>
+              <dd id="detailTimestamp" class="mt-1 text-slate-100 break-all"></dd>
+            </div>
+            <div>
+              <dt class="text-slate-400">状态</dt>
+              <dd id="detailStatus" class="mt-1 text-slate-100 break-all"></dd>
+            </div>
+            <div>
+              <dt class="text-slate-400">姓名</dt>
+              <dd id="detailMatchName" class="mt-1 text-slate-100 break-all"></dd>
+            </div>
+            <div>
+              <dt class="text-slate-400">相似度</dt>
+              <dd id="detailSimilarity" class="mt-1 text-slate-100 break-all"></dd>
+            </div>
+            <div>
+              <dt class="text-slate-400">阈值</dt>
+              <dd id="detailThreshold" class="mt-1 text-slate-100 break-all"></dd>
+            </div>
+            <div class="col-span-2">
+              <dt class="text-slate-400">消息</dt>
+              <dd id="detailMessage" class="mt-1 text-slate-100 break-all text-xs md:text-sm"></dd>
+            </div>
+          </dl>
+        </div>
+        <div>
+          <div class="text-xs text-slate-400 mb-1">抓拍图片</div>
+          <div
+            class="border border-slate-700 rounded-xl bg-slate-950 h-48 md:h-56 flex items-center justify-center overflow-hidden">
+            <img
+              id="detailImage"
+              src=""
+              alt="snapshot"
+              class="max-h-full max-w-full rounded-md hidden" />
+            <span
+              id="detailImagePlaceholder"
+              class="text-[11px] text-slate-500">
+              无图片路径或尚未配置静态访问
+            </span>
+          </div>
+          <p
+            id="detailImagePath"
+            class="mt-2 text-[11px] text-slate-500 break-all">
+          </p>
+        </div>
       </div>
-      <p id="modalPath" class="text-[11px] text-slate-500 mt-2 break-all">
-      </p>
     </div>
   </div>
 
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     let currentPage = 1
     const pageSize = 20
     let totalPages = 1
+    let currentPageData = []
+    let similarityChart = null
 
-    // 防抖函数：减少频繁请求
+    // 防抖
     function debounce(fn, delay) {
       let timer = null
       return function (...args) {
@@ -158,24 +220,117 @@
       }
     }
 
-    // 渲染状态徽章
     function renderStatusBadge(status) {
       const base =
         'inline-flex items-center px-2 py-[2px] rounded-full text-[11px] font-medium border'
       switch (status) {
         case 'OK':
-          return `<span class="${base} bg-emerald-500/10 text-emerald-300 border-emerald-500/40">正常</span>`
+          return `<span class="${base} bg-emerald-500/10 text-emerald-300 border-emerald-500/40">OK</span>`
         case 'ERROR':
-          return `<span class="${base} bg-rose-500/10 text-rose-300 border-rose-500/40">错误</span>`
+          return `<span class="${base} bg-rose-500/10 text-rose-300 border-rose-500/40">ERROR</span>`
         case 'NO_FACE':
-          return `<span class="${base} bg-amber-500/10 text-amber-300 border-amber-500/40">未检测人脸</span>`
+          return `<span class="${base} bg-amber-500/10 text-amber-300 border-amber-500/40">NO_FACE</span>`
         default:
           return `<span class="${base} bg-slate-500/10 text-slate-300 border-slate-500/40">${status ||
             '未知'}</span>`
       }
     }
 
-    // 请求数据
+    // 请求统计和图表数据（只看 OK 数据）
+    async function fetchStats() {
+      try {
+        const res = await fetch('/api/stats')
+        const stats = await res.json()
+
+        document.getElementById('totalCount').textContent = stats.total ?? 0
+        document.getElementById('okCount').textContent = stats.ok ?? 0
+        document.getElementById('errorCount').textContent = stats.error ?? 0
+        document.getElementById('noFaceCount').textContent = stats.no_face ?? 0
+
+        renderSimilarityChart(stats.ok_series || [])
+      } catch (e) {
+        console.error('获取统计失败', e)
+      }
+    }
+
+    function renderSimilarityChart(points) {
+      const ctx = document.getElementById('similarityChart').getContext('2d')
+
+      const labels = points.map((p) => p.timestamp || '')
+      const similarities = points.map((p) => p.similarity || 0)
+      const thresholds = points.map((p) => p.threshold || 0)
+
+      if (similarityChart) {
+        similarityChart.destroy()
+      }
+
+      similarityChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: '相似度 (OK)',
+              data: similarities,
+              borderWidth: 1.5,
+              tension: 0.15,
+              pointRadius: 1.5,
+              pointHitRadius: 6,
+              borderColor: 'rgba(56, 189, 248, 0.9)',
+              backgroundColor: 'rgba(56, 189, 248, 0.2)',
+            },
+            {
+              label: '阈值',
+              data: thresholds,
+              borderWidth: 1,
+              tension: 0.1,
+              borderDash: [4, 4],
+              borderColor: 'rgba(148, 163, 184, 0.9)',
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: '#e5e7eb',
+                font: { size: 11 },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: {
+                color: '#9ca3af',
+                maxRotation: 45,
+                minRotation: 0,
+              },
+              grid: {
+                display: false,
+              },
+            },
+            y: {
+              ticks: {
+                color: '#9ca3af',
+              },
+              grid: {
+                color: 'rgba(55,65,81,0.5)',
+              },
+              suggestedMin: 0,
+              suggestedMax: 1,
+            },
+          },
+        },
+      })
+    }
+
+    // 请求列表数据
     async function fetchData() {
       const status = document.getElementById('statusFilter').value
       const q = document.getElementById('searchInput').value.trim()
@@ -186,14 +341,17 @@
       if (status) params.set('status', status)
       if (q) params.set('q', q)
 
-      const res = await fetch('/api/records?' + params.toString())
-      const json = await res.json()
-
-      renderTable(json.data)
-      updateSummary(json)
+      try {
+        const res = await fetch('/api/records?' + params.toString())
+        const json = await res.json()
+        currentPageData = json.data || []
+        renderTable(currentPageData)
+        updateSummary(json)
+      } catch (e) {
+        console.error('获取列表失败', e)
+      }
     }
 
-    // 渲染表格
     function renderTable(rows) {
       const tbody = document.getElementById('tableBody')
       tbody.innerHTML = ''
@@ -201,58 +359,53 @@
       if (!rows || rows.length === 0) {
         const tr = document.createElement('tr')
         tr.innerHTML =
-          '<td colspan="7" class="px-3 py-4 text-center text-sm text-slate-500">暂无数据</td>'
+          '<td colspan="8" class="px-3 py-4 text-center text-sm text-slate-500">暂无数据</td>'
         tbody.appendChild(tr)
         return
       }
 
-      rows.forEach((rec) => {
+      rows.forEach((rec, index) => {
         const tr = document.createElement('tr')
-        tr.className =
-          'hover:bg-slate-800/60 transition-colors'
-
-        const similarityText = rec.similarity || '-'
-        const thresholdText = rec.threshold || '-'
-        const matchNameText = rec.match_name || '-'
-
+        tr.className = 'hover:bg-slate-800/60 transition-colors'
         tr.innerHTML = `
           <td class="px-3 py-2 whitespace-nowrap text-xs text-slate-400">
             ${rec.timestamp || ''}
           </td>
-          <td class="px-3 py-2 whitespace-nowrap">
-            <button
-              type="button"
-              class="text-[11px] text-sky-300 hover:text-sky-200 underline decoration-dotted"
-              data-image-path="${rec.image_path || ''}">
-              预览
-            </button>
-            <div class="text-[11px] text-slate-500 truncate max-w-xs">
-              ${rec.image_path || ''}
-            </div>
-          </td>
           <td class="px-3 py-2 whitespace-nowrap text-sm">
-            ${matchNameText}
+            ${rec.match_name || '-'}
           </td>
           <td class="px-3 py-2 whitespace-nowrap text-xs">
-            ${similarityText}
+            ${rec.similarity || '-'}
           </td>
           <td class="px-3 py-2 whitespace-nowrap text-xs text-slate-300">
-            ${thresholdText}
+            ${rec.threshold || '-'}
           </td>
           <td class="px-3 py-2 whitespace-nowrap">
             ${renderStatusBadge(rec.status)}
           </td>
+          <td class="px-3 py-2 text-xs max-w-xs">
+            <div class="truncate text-slate-400">
+              ${rec.image_path || ''}
+            </div>
+          </td>
           <td class="px-3 py-2 text-xs text-slate-300 max-w-sm">
-            <div class="line-clamp-2">
+            <div>
               ${rec.message || ''}
             </div>
+          </td>
+          <td class="px-3 py-2 whitespace-nowrap text-right text-xs">
+            <button
+              type="button"
+              data-detail-idx="${index}"
+              class="inline-flex items-center px-2.5 py-1 rounded-lg bg-sky-500/10 text-sky-300 hover:bg-sky-500/20">
+              详情
+            </button>
           </td>
         `
         tbody.appendChild(tr)
       })
     }
 
-    // 更新分页信息
     function updateSummary(meta) {
       const summary = document.getElementById('summary')
       const prevBtn = document.getElementById('prevPage')
@@ -270,28 +423,41 @@
       nextBtn.disabled = page >= totalPages
     }
 
-    // 打开/关闭图片弹窗
-    function openImageModal(path) {
-      const modal = document.getElementById('imageModal')
-      const img = document.getElementById('modalImage')
-      const text = document.getElementById('modalPath')
+    function openDetailModal(rec) {
+      document.getElementById('detailTimestamp').textContent = rec.timestamp || '-'
+      document.getElementById('detailStatus').textContent = rec.status || '-'
+      document.getElementById('detailMatchName').textContent = rec.match_name || '-'
+      document.getElementById('detailSimilarity').textContent = rec.similarity || '-'
+      document.getElementById('detailThreshold').textContent = rec.threshold || '-'
+      document.getElementById('detailMessage').textContent = rec.message || ''
 
-      img.src = path || ''
-      text.textContent = path || '无图片路径'
+      const img = document.getElementById('detailImage')
+      const placeholder = document.getElementById('detailImagePlaceholder')
+      const pathEl = document.getElementById('detailImagePath')
+
+      if (rec.image_path) {
+        img.src = rec.image_path
+        img.classList.remove('hidden')
+        placeholder.classList.add('hidden')
+        pathEl.textContent = rec.image_path
+      } else {
+        img.src = ''
+        img.classList.add('hidden')
+        placeholder.classList.remove('hidden')
+        pathEl.textContent = ''
+      }
+
+      const modal = document.getElementById('detailModal')
       modal.classList.remove('hidden')
       modal.classList.add('flex')
     }
 
-    function closeImageModal() {
-      const modal = document.getElementById('imageModal')
-      const img = document.getElementById('modalImage')
-
-      img.src = ''
+    function closeDetailModal() {
+      const modal = document.getElementById('detailModal')
       modal.classList.add('hidden')
       modal.classList.remove('flex')
     }
 
-    // 初始化事件
     document.addEventListener('DOMContentLoaded', () => {
       const searchInput = document.getElementById('searchInput')
       const statusFilter = document.getElementById('statusFilter')
@@ -299,10 +465,9 @@
       const nextPage = document.getElementById('nextPage')
       const refreshBtn = document.getElementById('refreshBtn')
       const tableBody = document.getElementById('tableBody')
-      const closeModalBtn = document.getElementById('closeModal')
-      const imageModal = document.getElementById('imageModal')
+      const detailClose = document.getElementById('detailClose')
+      const detailModal = document.getElementById('detailModal')
 
-      // 搜索防抖
       searchInput.addEventListener(
         'input',
         debounce(() => {
@@ -311,19 +476,18 @@
         }, 300),
       )
 
-      // 状态筛选
       statusFilter.addEventListener('change', () => {
         currentPage = 1
         fetchData()
       })
 
-      // 分页
       prevPage.addEventListener('click', () => {
         if (currentPage > 1) {
           currentPage--
           fetchData()
         }
       })
+
       nextPage.addEventListener('click', () => {
         if (currentPage < totalPages) {
           currentPage++
@@ -331,30 +495,34 @@
         }
       })
 
-      // 手动刷新
       refreshBtn.addEventListener('click', () => {
-        currentPage = 1
+        fetchStats()
         fetchData()
       })
 
-      // 图片预览（事件代理）
+      // 详情按钮事件
       tableBody.addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-image-path]')
+        const btn = e.target.closest('[data-detail-idx]')
         if (!btn) return
-        const path = btn.getAttribute('data-image-path') || ''
-        if (!path) return
-        openImageModal(path)
+        const idx = parseInt(btn.getAttribute('data-detail-idx'), 10)
+        if (Number.isNaN(idx) || !currentPageData[idx]) return
+        openDetailModal(currentPageData[idx])
       })
 
-      // 弹窗关闭
-      closeModalBtn.addEventListener('click', closeImageModal)
-      imageModal.addEventListener('click', (e) => {
-        if (e.target === imageModal) {
-          closeImageModal()
+      detailClose.addEventListener('click', closeDetailModal)
+      detailModal.addEventListener('click', (e) => {
+        if (e.target === detailModal) {
+          closeDetailModal()
+        }
+      })
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          closeDetailModal()
         }
       })
 
-      // 初次加载
+      // 首次加载
+      fetchStats()
       fetchData()
     })
   </script>
