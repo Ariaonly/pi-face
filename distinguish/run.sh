@@ -1,9 +1,9 @@
 
 docker run --rm -it \
-  --name=face1 \
-  --platform linux/arm64 \
+  --name=face \
   --device=/dev/video0 \
-  --mount type=bind,source="$HOME/project/data/face",target=/data \
+  --device=/dev/input/event5 \
+  --mount type=bind,source="$HOME/pro/face",target=/data \
   --network host \
-  face_pikachu_demo1:pi5 \
+  face:pi5 \
   /bin/bash
