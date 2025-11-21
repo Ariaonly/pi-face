@@ -137,15 +137,30 @@ HTML_PAGE = """
 <!doctype html>
 <html>
   <head>
-    <title>Hikvision IP Camera</title>
+    <title>Hikvision Preview</title>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: sans-serif; }
+      img { max-width: 100%; }
+    </style>
   </head>
   <body>
-    <h1>Hikvision IP Camera - MJPEG Stream</h1>
-    <p>如果下方无画面，可尝试直接访问 <a href="/snapshot" target="_blank">/snapshot</a> 看能否看到单帧图片。</p>
-    <img src="/video_feed" width="800" />
+    <h1>Hikvision Preview (auto refresh)</h1>
+    <p>每 200ms 刷新一帧，看到的就是程序当前捕获的画面。</p>
+    <img id="cam" src="/snapshot" />
+    <script>
+      function reloadImage() {
+        var img = document.getElementById("cam");
+        // 加时间戳防止浏览器缓存
+        img.src = "/snapshot?t=" + new Date().getTime();
+      }
+      // 200ms 刷新一次
+      setInterval(reloadImage, 200);
+    </script>
   </body>
 </html>
 """
+
 
 
 @app.route("/")
