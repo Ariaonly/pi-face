@@ -8,9 +8,9 @@ from flask import Flask, Response, render_template_string
 IP = "192.168.1.111"
 USER = "admin"
 PWD = "Long-Live-NBALab"
-PORT = 554           # RTSP 端口，一般海康默认 554
-HTTP_HOST = "0.0.0.0"  # 对外监听地址，0.0.0.0 表示所有网卡
-HTTP_PORT = 5000       # 本地 HTTP 端口，你的另一个程序就访问这个
+PORT = 554              # RTSP 端口，一般海康默认 554
+HTTP_HOST = "0.0.0.0"   # 对外监听地址，0.0.0.0 表示所有网卡
+HTTP_PORT = 5000        # 本地 HTTP 端口
 # =======================
 
 # 海康常见 RTSP URL 候选列表
@@ -30,7 +30,6 @@ CANDIDATE_URLS = [
     f"rtsp://{USER}:{PWD}@{IP}:{PORT}/h265/ch1/sub/av_stream",
 ]
 
-# 全局变量：存放最新一帧
 latest_frame = None
 frame_lock = threading.Lock()
 stop_flag = False
@@ -92,7 +91,6 @@ def capture_thread_func():
             time.sleep(0.5)
             continue
 
-        # 更新最新帧
         with frame_lock:
             latest_frame = frame
 
@@ -104,18 +102,20 @@ def mjpeg_generator():
     """Flask 使用的生成器，将 latest_frame 编码为 JPEG，并以 MJPEG 形式输出"""
     global latest_frame, stop_flag
 
+    print("[INFO] 新的 MJPEG 客户端连接")
     while not stop_flag:
         with frame_lock:
             frame = None if latest_frame is None else latest_frame.copy()
 
         if frame is None:
-            # 没有帧就稍微等一下
+            # 还没拿到任何帧，稍微等一下
             time.sleep(0.05)
             continue
 
         # 编码为 JPEG
         ret, jpeg = cv2.imencode(".jpg", frame)
         if not ret:
+            print("[WARN] JPEG 编码失败")
             continue
 
         jpg_bytes = jpeg.tobytes()
@@ -128,15 +128,23 @@ def mjpeg_generator():
             b"\r\n"
         )
 
+    print("[INFO] MJPEG 生成器结束")
+
 
 # ===== Flask 路由 =====
 
-# 简单网页预览
 HTML_PAGE = """
 <!doctype html>
-<title>Hikvision IP Camera</title>
-<h1>Hikvision IP Camera - MJPEG Stream</h1>
-<img src="/video_feed" width="800" />
+<html>
+  <head>
+    <title>Hikvision IP Camera</title>
+  </head>
+  <body>
+    <h1>Hikvision IP Camera - MJPEG Stream</h1>
+    <p>如果下方无画面，可尝试直接访问 <a href="/snapshot" target="_blank">/snapshot</a> 看能否看到单帧图片。</p>
+    <img src="/video_feed" width="800" />
+  </body>
+</html>
 """
 
 
@@ -154,6 +162,23 @@ def video_feed():
     )
 
 
+@app.route("/snapshot")
+def snapshot():
+    """返回当前最新的一帧 JPEG，便于调试"""
+    global latest_frame
+    with frame_lock:
+        frame = None if latest_frame is None else latest_frame.copy()
+
+    if frame is None:
+        return "no frame yet", 503
+
+    ret, jpeg = cv2.imencode(".jpg", frame)
+    if not ret:
+        return "encode failed", 500
+
+    return Response(jpeg.tobytes(), mimetype="image/jpeg")
+
+
 def main():
     global stop_flag
 
@@ -161,14 +186,13 @@ def main():
     t = threading.Thread(target=capture_thread_func, daemon=True)
     t.start()
 
-    # 启动 Flask HTTP 服务器
     print(f"[INFO] 启动 HTTP MJPEG 服务: http://{HTTP_HOST}:{HTTP_PORT}/")
     print(f"[INFO] MJPEG 流地址: http://{HTTP_HOST}:{HTTP_PORT}/video_feed")
+    print(f"[INFO] 单帧调试地址: http://{HTTP_HOST}:{HTTP_PORT}/snapshot")
+
     try:
-        # debug=False 避免多进程导致问题
         app.run(host=HTTP_HOST, port=HTTP_PORT, debug=False, threaded=True)
     finally:
-        # 退出时通知采集线程停止
         stop_flag = True
         t.join(timeout=2)
         print("[INFO] 程序退出")
