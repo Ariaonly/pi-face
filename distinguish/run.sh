@@ -2,6 +2,7 @@
 docker run --rm -it \
   --name=face \
   --device=/dev/video0 \
+  # --platform linux/arm64 \
   --device=/dev/input/event5 \
   --mount type=bind,source="$HOME/pro/face",target=/data \
   --network host \
