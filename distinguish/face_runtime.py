@@ -1,431 +1,312 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-单文件人脸识别运行脚本：
-
-- 已知人脸：/data/know
-    支持两种结构：
-      1) /data/know/<person_name>/*.jpg|*.png
-      2) /data/know/*.jpg|*.png （用文件名前缀当人名）
-
-- 按钮：/dev/input/event5  （EV_KEY 任意按下触发）
-
-- 摄像头：/dev/video0  （OpenCV: index=0）
-
-- 未知抓拍：/data/unknow/UNKNOWN_YYYYmmdd_HHMMSS_xxx.jpg
-
-- 日志：/data/logs/records.csv
-    字段：
-      timestamp, image_path, match_name, similarity,
-      threshold, status, message
-
-防堵塞：
-- 主线程：监听按键 + 拍照 + 把任务放到队列
-- 工作线程：从队列取帧 → 识别 → 写日志
-"""
 
 import os
-import csv
 import time
-import threading
-import queue
+import json
 from datetime import datetime
 
 import cv2
 import numpy as np
 import inspireface as isf
-from evdev import InputDevice, categorize, ecodes
+
+# ================== 配置区域 ==================
+
+# 摄像头 / 视频流来源：改为本地 5000 端口
+VIDEO_SOURCE = os.environ.get("VIDEO_SOURCE", "http://127.0.0.1:5000/video_feed")
+
+# 已知人脸目录
+KNOW_FACE_DIR = "/data/know"
+os.makedirs(KNOW_FACE_DIR, exist_ok=True)
+
+# 未知（抓拍）人脸保存目录
+FACE_SAVE_DIR = "/data/unknow"
+os.makedirs(FACE_SAVE_DIR, exist_ok=True)
+
+# 特征数据库
+FEATURE_DB_DIR = "/data/feature_db"
+FEATURE_DB_PATH = os.path.join(FEATURE_DB_DIR, "feature_hub.db")
+LABEL_MAP_PATH = os.path.join(FEATURE_DB_DIR, "label_map.json")
+os.makedirs(FEATURE_DB_DIR, exist_ok=True)
+
+# 识别阈值
+SEARCH_THRESHOLD = 0.48
+
+# 是否显示调试窗口
+SHOW_WINDOW = False
+
+# 全局：face_id -> label 的映射
+KNOWN_LABEL_MAP = {}
 
 
-# ===== 路径配置（全部使用绝对路径） =====
-DATA_ROOT = "/data"
-KNOWN_DIR = os.path.join(DATA_ROOT, "know")
-UNKNOWN_DIR = os.path.join(DATA_ROOT, "unknow")
-LOG_DIR = os.path.join(DATA_ROOT, "logs")
-LOG_FILE = os.path.join(LOG_DIR, "records.csv")
+# ================== 工具函数：label map ==================
 
-EVENT_DEVICE_PATH = "/dev/input/event5"  # 按钮事件设备
-CAMERA_INDEX = 0                         # /dev/video0
-
-# 支持的图片后缀
-IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
-
-# 任务队列最大长度（防止无限堆积）
-TASK_QUEUE_MAXSIZE = 10
-
-
-def ensure_dirs():
-    """确保必要目录存在"""
-    os.makedirs(KNOWN_DIR, exist_ok=True)
-    os.makedirs(UNKNOWN_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
+def load_label_map():
+    global KNOWN_LABEL_MAP
+    if os.path.exists(LABEL_MAP_PATH):
+        try:
+            with open(LABEL_MAP_PATH, "r", encoding="utf-8") as f:
+                KNOWN_LABEL_MAP = json.load(f)
+            print(f"[INFO] 已加载 label_map: {len(KNOWN_LABEL_MAP)} 条")
+        except Exception as e:
+            print("[WARN] 读取 label_map 失败，将重新构建：", e)
+            KNOWN_LABEL_MAP = {}
+    else:
+        KNOWN_LABEL_MAP = {}
 
 
-def init_session():
-    """初始化 InspireFace：拉取模型 + 创建 Session"""
-    print("[INFO] 初始化 InspireFace (launch Pikachu)...")
-    isf.launch()  # 默认就是 Pikachu
+def save_label_map():
+    try:
+        with open(LABEL_MAP_PATH, "w", encoding="utf-8") as f:
+            json.dump(KNOWN_LABEL_MAP, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] 已保存 label_map: {len(KNOWN_LABEL_MAP)} 条 -> {LABEL_MAP_PATH}")
+    except Exception as e:
+        print("[WARN] 保存 label_map 失败：", e)
+
+
+# ================== 初始化 InspireFace ==================
+
+def init_inspireface():
+    """
+    初始化 InspireFace 会话 + FeatureHub + 预载 /data/know 已知人脸
+    """
+    try:
+        isf.reload("Pikachu")
+    except Exception as e:
+        print("[WARN] reload Pikachu 失败，可能你已经在 C++ 侧配置好模型了：", e)
 
     opt = isf.HF_ENABLE_FACE_RECOGNITION
+
+    # 注意：使用位置参数，不要用 opt=opt
     session = isf.InspireFaceSession(
-        param=opt,
-        detect_mode=isf.HF_DETECT_MODE_ALWAYS_DETECT,
-        max_detect_num=5,
-        detect_pixel_level=160,
+        opt,
+        isf.HF_DETECT_MODE_ALWAYS_DETECT,
     )
+
     session.set_detection_confidence_threshold(0.5)
-    print("[INFO] InspireFace Session 初始化完成")
+
+    # 启用 FeatureHub（sqlite）
+    feature_hub_cfg = isf.FeatureHubConfiguration(
+        primary_key_mode=isf.HF_PK_AUTO_INCREMENT,
+        enable_persistence=True,
+        persistence_db_path=FEATURE_DB_PATH,
+        search_threshold=SEARCH_THRESHOLD,
+        search_mode=isf.HF_SEARCH_MODE_EAGER,
+    )
+    ret = isf.feature_hub_enable(feature_hub_cfg)
+    assert ret, "Failed to enable FeatureHub"
+
+    print("[INFO] InspireFace 初始化完成，特征库：", FEATURE_DB_PATH)
+    print("[INFO] 当前库中已有的人脸数：", isf.feature_hub_get_face_count())
+
+    # 先加载已有 label_map
+    load_label_map()
+
+    # 如果没有 label_map，则从 /data/know 生成一遍
+    if not KNOWN_LABEL_MAP:
+        build_known_faces_from_dir(session)
+
     return session
 
 
-def load_known_faces(session):
+# ================== 已知人脸建库 ==================
+
+def is_image_file(path: str) -> bool:
+    ext = os.path.splitext(path)[1].lower()
+    return ext in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+
+
+def build_known_faces_from_dir(session):
     """
-    从 KNOWN_DIR 加载已知人脸特征
-    支持两种结构：
-      1) /data/know/<person_name>/*.jpg|*.png
-      2) /data/know/*.jpg|*.png  （用文件名前缀当人名）
-    返回：dict[name] = feature_vector(np.ndarray)
+    从 /data/know 目录读取图片，建立已知人脸特征并写入 FeatureHub。
+    规则：文件名（不含后缀）作为 label，例如：/data/know/zhangsan.jpg -> "zhangsan"
     """
-    known_features = {}
-    person_count = 0
-    img_count = 0
+    global KNOWN_LABEL_MAP
 
-    if not os.path.isdir(KNOWN_DIR):
-        print(f"[WARN] 已知人脸目录不存在: {KNOWN_DIR}")
-        return known_features
+    if not os.path.isdir(KNOW_FACE_DIR):
+        print(f"[WARN] 已知人脸目录不存在：{KNOW_FACE_DIR}")
+        return
 
-    # ---------- 模式 1：子目录，每个目录一个人 ----------
-    for person_name in sorted(os.listdir(KNOWN_DIR)):
-        person_dir = os.path.join(KNOWN_DIR, person_name)
-        if not os.path.isdir(person_dir):
+    files = sorted(os.listdir(KNOW_FACE_DIR))
+    if not files:
+        print(f"[WARN] 已知人脸目录为空：{KNOW_FACE_DIR}")
+        return
+
+    inserted = 0
+
+    for fname in files:
+        path = os.path.join(KNOW_FACE_DIR, fname)
+        if not os.path.isfile(path) or not is_image_file(path):
             continue
 
-        feats = []
-        for fname in sorted(os.listdir(person_dir)):
-            if not fname.lower().endswith(IMG_EXTS):
-                continue
-            img_path = os.path.join(person_dir, fname)
-            image = cv2.imread(img_path)
-            if image is None:
-                print(f"[WARN] 无法读取图像: {img_path}")
-                continue
+        label = os.path.splitext(fname)[0]
 
-            faces = session.face_detection(image)
-            if not faces:
-                print(f"[WARN] 未检测到人脸: {img_path}")
-                continue
-
-            face = faces[0]
-            feature = session.face_feature_extract(image, face)
-            if feature is None:
-                print(f"[WARN] 提取特征失败: {img_path}")
-                continue
-
-            feats.append(feature)
-            img_count += 1
-
-        if feats:
-            feature_avg = np.mean(np.stack(feats, axis=0), axis=0)
-            known_features[person_name] = feature_avg
-            person_count += 1
-            print(f"[INFO] [子目录] 加载已知人物 {person_name}，使用图片 {len(feats)} 张")
-        else:
-            print(f"[WARN] [子目录] 人物 {person_name} 没有可用人脸图像")
-
-    # ---------- 模式 2：根目录下直接放图片 ----------
-    root_feats = {}  # name -> list[feat]
-
-    for fname in sorted(os.listdir(KNOWN_DIR)):
-        path = os.path.join(KNOWN_DIR, fname)
-        if not os.path.isfile(path):
-            continue
-        if not fname.lower().endswith(IMG_EXTS):
+        # 已经有同名 label 的就跳过（防止重复插入）
+        if label in KNOWN_LABEL_MAP.values():
+            print(f"[INFO] 跳过已存在 label: {label}")
             continue
 
-        # 取文件名（去扩展名），遇到 "_" 或 "-" 前面的作为人名
-        base = os.path.splitext(fname)[0]
-        for sep in ["_", "-"]:
-            if sep in base:
-                base = base.split(sep)[0]
-                break
-        person_name = base
-
-        image = cv2.imread(path)
-        if image is None:
-            print(f"[WARN] 无法读取图像: {path}")
+        img = cv2.imread(path)
+        if img is None:
+            print(f"[WARN] 无法读取图片：{path}")
             continue
 
-        faces = session.face_detection(image)
+        faces = session.face_detection(img)
         if not faces:
-            print(f"[WARN] 未检测到人脸: {path}")
+            print(f"[WARN] 未检测到人脸：{path}")
             continue
 
         face = faces[0]
-        feature = session.face_feature_extract(image, face)
-        if feature is None:
-            print(f"[WARN] 提取特征失败: {path}")
+
+        feature = session.face_feature_extract(img, face)
+        if feature is None or feature.size == 0:
+            print(f"[WARN] 未能提取特征：{path}")
             continue
 
-        root_feats.setdefault(person_name, []).append(feature)
-        img_count += 1
+        # 构造 FaceIdentity，这里第二个参数给个占位 id（在 AUTO_INCREMENT 模式下实际主键由 DB 分配）
+        identity = isf.FaceIdentity(feature, -1)
 
-    for person_name, feats in root_feats.items():
-        feature_avg = np.mean(np.stack(feats, axis=0), axis=0)
-        # 如果子目录模式里已经有同名人物，这里就“补充平均”
-        if person_name in known_features:
-            feature_avg = np.mean(
-                np.stack([known_features[person_name], feature_avg], axis=0),
-                axis=0
-            )
-        known_features[person_name] = feature_avg
-        person_count += 1
-        print(f"[INFO] [根目录] 加载已知人物 {person_name}，使用图片 {len(feats)} 张")
+        ret, face_id = isf.feature_hub_face_insert(identity)
+        if not ret:
+            print(f"[WARN] 插入 FeatureHub 失败：{path}")
+            continue
 
-    print(f"[INFO] 已加载已知人物数量: {person_count}，总有效图片: {img_count}")
-    return known_features
+        KNOWN_LABEL_MAP[str(face_id)] = label
+        inserted += 1
+        print(f"[INFO] 已加入已知人脸: face_id={face_id}, label={label}, file={fname}")
 
+    if inserted > 0:
+        save_label_map()
 
-def prepare_log_file():
-    """如果日志不存在，则写入表头"""
-    if not os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "timestamp",      # 时间戳
-                "image_path",     # 未知图片路径
-                "match_name",     # 匹配到的人名 (或 UNKNOWN/NO_FACE/ERROR)
-                "similarity",     # 相似度（余弦）
-                "threshold",      # 使用的阈值
-                "status",         # MATCH / NO_MATCH / NO_FACE / ERROR
-                "message",        # 额外信息
-            ])
+    print(f"[INFO] 已知人脸建库完成，本次新增 {inserted} 条，总数 {len(KNOWN_LABEL_MAP)}")
 
 
-def recognize_and_log(session, known_features, frame, image_path, timestamp_str, threshold):
+# ================== 工具函数 ==================
+
+def crop_face_from_frame(frame, face):
     """
-    在工作线程中执行：识别 + 写日志
+    根据 InspireFace 的 face.location 从整帧中截取人脸子图
     """
-    status = "ERROR"
-    label = "ERROR"
-    msg = ""
-    sim = None
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = map(int, face.location)
 
-    try:
-        if frame is None:
-            status = "ERROR"
-            msg = "frame is None"
-        else:
-            faces = session.face_detection(frame)
-            if not faces:
-                status = "NO_FACE"
-                label = "NO_FACE"
-                msg = "no face detected"
-            else:
-                face = faces[0]
-                feature = session.face_feature_extract(frame, face)
-                if feature is None:
-                    status = "ERROR"
-                    label = "ERROR"
-                    msg = "feature extraction failed"
-                elif not known_features:
-                    status = "ERROR"
-                    label = "ERROR"
-                    msg = "no known faces loaded"
-                else:
-                    best_name = None
-                    best_score = -1.0
-                    for name, known_feat in known_features.items():
-                        score = isf.feature_comparison(feature, known_feat)
-                        if score > best_score:
-                            best_score = score
-                            best_name = name
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(0, min(x2, w))
+    y2 = max(0, min(y2, h))
 
-                    sim = float(best_score)
+    if x2 <= x1 or y2 <= y1:
+        return None
 
-                    if best_score >= threshold:
-                        status = "MATCH"
-                        label = best_name
-                    else:
-                        status = "NO_MATCH"
-                        label = "UNKNOWN"
-
-    except Exception as e:
-        status = "ERROR"
-        label = "ERROR"
-        msg = f"exception: {e}"
-
-    # 写日志（每次 append 一行，避免多线程共享 file handle）
-    try:
-        with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                timestamp_str,
-                image_path,
-                label,
-                f"{sim:.6f}" if sim is not None else "",
-                f"{threshold:.6f}",
-                status,
-                msg,
-            ])
-    except Exception as e:
-        print(f"[ERROR] 写日志失败: {e}")
-
-    print(f"[INFO] 识别完成: {image_path} -> {label} "
-          f"(status={status}, sim={sim}, threshold={threshold})")
+    return frame[y1:y2, x1:x2].copy()
 
 
-def worker_loop(session, known_features, task_queue, threshold):
+def save_face_image(face_img):
     """
-    工作线程主循环：从队列取任务，调用 recognize_and_log
-    任务格式：(frame, image_path, timestamp_str)
+    把截取的人脸图保存到 /data/unknow 下
+    返回保存路径
     """
-    print("[INFO] 工作线程已启动，等待识别任务...")
-    while True:
-        item = task_queue.get()
-        if item is None:
-            # 收到结束信号
-            break
-        frame, image_path, timestamp_str = item
-        recognize_and_log(session, known_features, frame, image_path, timestamp_str, threshold)
-        task_queue.task_done()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{ts}.jpg"
+    save_path = os.path.join(FACE_SAVE_DIR, filename)
+    cv2.imwrite(save_path, face_img)
+    return save_path
 
 
-def open_camera():
-    """打开摄像头 /dev/video0"""
-    print("[INFO] 打开摄像头 /dev/video0 ...")
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        raise RuntimeError("无法打开摄像头 /dev/video0")
-    print("[INFO] 摄像头已打开")
-    return cap
+def recognize_face(session, frame, face):
+    """
+    对单张人脸进行识别：
+    1. 用整帧 + face 做特征提取
+    2. 用 FeatureHub 搜索最近的一个 ID
+    3. 返回 (是否匹配, 置信度, identity_id, label)
+    """
+    feature = session.face_feature_extract(frame, face)
+    if feature is None or feature.size == 0:
+        return False, 0.0, -1, None
+
+    result = isf.feature_hub_face_search(feature)
+    if result is None:
+        return False, 0.0, -1, None
+
+    # 在 1.2.3 里返回的是 SearchResult 对象
+    # 一般有 result.confidence 和 result.face_id / identity_id 之类的字段
+    confidence = getattr(result, "confidence", 0.0)
+    identity_id = getattr(result, "face_id", None)
+    if identity_id is None:
+        identity_id = getattr(result, "identity_id", -1)
+
+    is_match = confidence >= SEARCH_THRESHOLD
+
+    label = KNOWN_LABEL_MAP.get(str(identity_id))
+    return is_match, float(confidence), int(identity_id), label
 
 
-def open_input_device():
-    """打开按键输入设备 /dev/input/event5"""
-    print(f"[INFO] 打开输入设备 {EVENT_DEVICE_PATH} ...")
-    dev = InputDevice(EVENT_DEVICE_PATH)
-    print(f"[INFO] 输入设备已打开: {dev}")
-    return dev
 
+# ================== 主循环：从 5000 端口拉流 + 截脸再识别 ==================
 
 def main():
-    ensure_dirs()
-    prepare_log_file()
+    session = init_inspireface()
 
-    # 初始化 InspireFace
-    session = init_session()
-    # 加载已知人脸
-    known_features = load_known_faces(session)
+    print("[INFO] 使用视频源：", VIDEO_SOURCE)
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
 
-    # 推荐阈值（可以后期根据现场数据微调）
-    threshold = isf.get_recommended_cosine_threshold()
-    print(f"[INFO] 使用推荐阈值: {threshold:.4f}")
-
-    # 打开摄像头 & 输入设备
-    cap = open_camera()
-    dev = open_input_device()
-
-    # 创建任务队列 & 工作线程
-    task_queue = queue.Queue(maxsize=TASK_QUEUE_MAXSIZE)
-    worker = threading.Thread(
-        target=worker_loop,
-        args=(session, known_features, task_queue, threshold),
-        daemon=True,
-    )
-    worker.start()
-
-    print("[INFO] 进入主循环：等待按键事件触发拍照...")
+    if not cap.isOpened():
+        print("[ERROR] 无法打开视频源：", VIDEO_SOURCE)
+        return
 
     try:
-        for event in dev.read_loop():
-            if event.type != ecodes.EV_KEY:
-                continue
-
-            key_event = categorize(event)
-            # 只在“按下”时触发（keystate: 1=down, 2=hold, 0=up）
-            if key_event.keystate not in (key_event.key_down, key_event.key_hold):
-                continue
-
-            # 这里你可以打印一下是哪个键：
-            # print(f"[DEBUG] key: {key_event.keycode}, keystate: {key_event.keystate}")
-
-            # 拍照
+        while True:
             ret, frame = cap.read()
             if not ret or frame is None:
-                print("[WARN] 摄像头抓拍失败")
-                # 写一条错误日志
-                now = datetime.now()
-                timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
-                image_path = ""  # 没有保存成功
-                with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        timestamp_str,
-                        image_path,
-                        "ERROR",
-                        "",
-                        f"{threshold:.6f}",
-                        "ERROR",
-                        "camera capture failed",
-                    ])
+                print("[WARN] 读取帧失败，稍后重试...")
+                time.sleep(0.1)
                 continue
 
-            # 保存图片到 UNKNOWN_DIR
-            now = datetime.now()
-            timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
-            fname_ts = now.strftime("%Y%m%d_%H%M%S")
-            filename = f"UNKNOWN_{fname_ts}.jpg"
-            image_path = os.path.join(UNKNOWN_DIR, filename)
-
-            try:
-                cv2.imwrite(image_path, frame)
-            except Exception as e:
-                print(f"[ERROR] 保存图片失败: {e}")
-                # 记录日志
-                with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        timestamp_str,
-                        image_path,
-                        "ERROR",
-                        "",
-                        f"{threshold:.6f}",
-                        "ERROR",
-                        f"save image failed: {e}",
-                    ])
+            # 1. 人脸检测（在整帧上做）
+            faces = session.face_detection(frame)
+            if not faces:
+                if SHOW_WINDOW:
+                    cv2.imshow("Face Runtime", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
                 continue
 
-            print(f"[INFO] 按键触发拍照，已保存到: {image_path}")
+            for face in faces:
+                # 2. 截取人脸子图
+                face_img = crop_face_from_frame(frame, face)
+                if face_img is None:
+                    continue
 
-            # 把任务提交给队列（工作线程异步识别）
-            try:
-                task_queue.put_nowait((frame.copy(), image_path, timestamp_str))
-            except queue.Full:
-                print("[WARN] 任务队列已满，本次识别任务被丢弃")
-                # 写一条 ERROR 日志说明队列满
-                with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        timestamp_str,
-                        image_path,
-                        "ERROR",
-                        "",
-                        f"{threshold:.6f}",
-                        "ERROR",
-                        "task queue full, dropped",
-                    ])
+                face_path = save_face_image(face_img)
 
-    except KeyboardInterrupt:
-        print("\n[INFO] 收到中断信号，准备退出...")
+                # 3. 识别
+                is_match, conf, identity_id, label = recognize_face(session, frame, face)
+
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if is_match:
+                    name_part = label if label else f"id={identity_id}"
+                    print(f"[{ts}] MATCH {name_part} id={identity_id} conf={conf:.3f} img={face_path}")
+                else:
+                    print(f"[{ts}] UNKNOWN id={identity_id} conf={conf:.3f} img={face_path}")
+
+                if SHOW_WINDOW:
+                    x1, y1, x2, y2 = map(int, face.location)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    txt = label if label else f"id={identity_id}"
+                    label_txt = f"{txt} {conf:.2f}"
+                    cv2.putText(frame, label_txt, (x1, max(0, y1 - 5)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            if SHOW_WINDOW:
+                cv2.imshow("Face Runtime", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
     finally:
-        try:
-            cap.release()
-        except Exception:
-            pass
-        # 给工作线程发一个结束信号（如果你想优雅退出，可以取消注释下面两行）
-        # task_queue.put(None)
-        # worker.join(timeout=1.0)
-        print("[INFO] 已退出主循环")
+        cap.release()
+        if SHOW_WINDOW:
+            cv2.destroyAllWindows()
+        print("[INFO] 资源已释放，程序退出。")
 
 
 if __name__ == "__main__":
